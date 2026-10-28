@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Relatório Tracker</title>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    margin: 0; padding: 24px; background: #f5f7fa; color: #1f2937;
+  }
+  .container { max-width: 1400px; margin: 0 auto; }
+  h1 { color: #1f4e79; margin-top: 0; }
+  h2 { color: #1f4e79; border-bottom: 2px solid #d9e2f3; padding-bottom: 6px; margin-top: 32px; }
+  h3 { color: #374151; margin: 20px 0 8px; font-size: 15px; }
+  .toolbar { margin: 12px 0 20px; }
+  .toolbar button {
+    background: #1f4e79; color: #fff; border: 0; border-radius: 6px;
+    padding: 8px 14px; font-size: 13px; cursor: pointer;
+  }
+  .toolbar button:hover { background: #16395a; }
+  .cards {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    gap: 12px; margin: 20px 0;
+  }
+  .card {
+    background: #fff; border: 1px solid #e5e7eb; border-radius: 10px;
+    padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  }
+  .card .num { font-size: 26px; font-weight: 700; color: #1f4e79; }
+  .card .label { font-size: 12px; color: #6b7280; margin-top: 4px; line-height: 1.3; }
+  .card.alert .num { color: #b91c1c; }
+  .chart-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+    gap: 16px;
+  }
+  .chart-box {
+    background: #fff; border: 1px solid #e5e7eb; border-radius: 10px;
+    padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  }
+  .chart-box h3 { margin-top: 0; }
+  .chart-box .wrap { position: relative; height: 340px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border: 1px solid #e5e7eb; padding: 8px 10px; text-align: left; }
+  th { background: #eef3fb; color: #1f4e79; }
+  .table-box {
+    background: #fff; border: 1px solid #e5e7eb; border-radius: 10px;
+    padding: 16px; margin-bottom: 16px; overflow-x: auto;
+  }
+  .heat td { text-align: center; }
+  .heat td.h-label { text-align: left; font-weight: 600; }
+  #loading { padding: 20px; color: #6b7280; }
+  #fileZone { display: none; margin: 20px 0; }
+  #fileInput {
+    padding: 12px; border: 2px dashed #93c5fd; border-radius: 8px;
+    background: #eff6ff; width: 100%; font-size: 14px;
+  }
+  .info {
+    background: #fffbeb; border: 1px solid #fde68a; padding: 12px;
+    border-radius: 8px; margin: 12px 0; font-size: 13px;
+  }
+  .obs { color: #6b7280; font-size: 12px; }
+
+  @media print {
+    body { background: #fff; padding: 0; }
+    .toolbar, #fileZone { display: none !important; }
+    .card, .chart-box, .table-box { break-inside: avoid; box-shadow: none; }
+    h2 { break-before: page; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Relatório detalhado — Planilha Tracker</h1>
+  <p class="obs">Dashboard gerado 100% no navegador. Nenhum dado é enviado para servidores.</p>
+
+  <div class="toolbar">
+    <button onclick="window.print()">🖨️ Imprimir / Salvar como PDF</button>
+  </div>
+
+  <div id="loading">Carregando <code>dados.xlsx</code>…</div>
+
+  <div id="fileZone">
+    <div class="info">
+      Não foi possível carregar o arquivo automaticamente.
+      Selecione o <b>dados.xlsx</b> (ou a planilha original) abaixo.
+    </div>
+    <input type="file" id="fileInput" accept=".xlsx,.xls">
+  </div>
+
+  <div id="report" style="display:none"></div>
+</div>
+
+<script>
+// ============================================================
+// CONFIGURAÇÃO
+// ============================================================
+const FILE_CANDIDATES = [
+  'dados.xlsx',
+  'planilha tracker 2.xlsx',
+  'planilha_tracker_2.xlsx'
+];
+
+// ============================================================
+// HELPERS
+// ============================================================
+function normalize(s) {
+  return String(s == null ? '' : s)
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase().trim();
+}
+function cleanText(s) {
+  return String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+}
+function fixCam(s) {
+  // corrige "CAMINHÃO" corrompido (ÃƒO, CAMINHAO, CAMINHÃO, ...)
+  return String(s || '')
+    .replace(/CAMINH[ÃA-F0-9]+ES/gi, 'CAMINHÕES')
+    .replace(/CAMINH[ÃA-F0-9]+O/gi, 'CAMINHÃO');
+}
+function isEmpty(v) {
+  const s = String(v == null ? '' : v).trim().toUpperCase();
+  return s === '' || s === 'NAN' || s === 'NONE' || s === '(VAZIO)';
+}
+function findCol(headers, terms) {
+  // 1) tentativa por igualdade
+  for (const h of headers) {
+    const lc = normalize(h);
+    for (const t of terms) if (lc === normalize(t)) return h;
+  }
+  // 2) tentativa por substring
+  for (const h of headers) {
+    const lc = normalize(h);
+    for (const t of terms) if (lc.includes(normalize(t))) return h;
+  }
+  return null;
+}
+
+// ============================================================
+// CARREGAMENTO
+// ============================================================
+async function tryAutoLoad() {
+  for (const name of FILE_CANDIDATES) {
+    try {
+      const url = name.split('/').map(encodeURIComponent).join('/');
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) continue;
+      const buf = await res.arrayBuffer();
+      processWorkbook(buf);
+      return;
+    } catch (_) { /* tenta próximo */ }
+  }
+  document.getElementById('loading').style.display = 'none';
+  document.getElementById('fileZone').style.display = 'block';
+}
+
+document.getElementById('fileInput').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const buf = await file.arrayBuffer();
+  processWorkbook(buf);
+});
+
+// ============================================================
+// PROCESSAMENTO
+// ============================================================
+function processWorkbook(buf) {
+  const wb = XLSX.read(buf, { type: 'array' });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+
+  // detectar cabeçalho
+  let headerIdx = 0;
+  for (let i = 0; i < Math.min(15, rows.length); i++) {
+    const low = rows[i].map(v => normalize(v));
+    if (low.some(v => v === 'placa') && low.some(v => v.includes('modelo'))) {
+      headerIdx = i; break;
+    }
+  }
+
+  const headers = rows[headerIdx].map(h => cleanText(h));
+  const rawData = rows.slice(headerIdx + 1).filter(r => r.some(c => !isEmpty(c)));
+
+  const data = rawData.map(r => {
+    const o = {};
+    headers.forEach((h, i) => { o[h] = r[i] !== undefined ? r[i] : ''; });
+    return o;
+  });
+
+  const colPlaca    = findCol(headers, ['placa']);
+  const colModelo   = findCol(headers, ['modelo']);
+  const colSituacao = findCol(headers, ['situacao', 'situação']);
+  const colOrigem   = findCol(headers, ['origem']);
+  const colTipo     = findCol(headers, ['tipo_veiculo', 'tipo veiculo', 'tipo de veiculo']);
+  const colEquip    = findCol(headers, ['equipamento instalado', 'equipamento']);
+  const colTracker  = findCol(headers, ['tracker instalado', 'tracker']);
+  const colPlanilha = findCol(headers, ['planilha de instalação', 'planilha de instalacao', 'planilha de instala']);
+  const colObs      = findCol(headers, ['obs', 'observa']);
+
+  // enriquecimento
+  data.forEach(d => {
+    d._placa    = isEmpty(d[colPlaca]) ? '' : String(d[colPlaca]).trim().toUpperCase();
+    d._modelo   = cleanText(d[colModelo]);
+    d._situacao = fixCam(cleanText(d[colSituacao])).toUpperCase() || '(VAZIO)';
+    d._origemRaw = cleanText(d[colOrigem]).toUpperCase();
+    d._origem   = d._origemRaw.includes('SGA')   ? 'SGA'
+                : d._origemRaw.includes('ILEVA') ? 'ILEVA'
+                : (d._origemRaw || '(VAZIO)');
+    d._tipo     = fixCam(cleanText(d[colTipo])).toUpperCase() || '(VAZIO)';
+    d._tracker  = cleanText(d[colTracker]).toUpperCase() || '(VAZIO)';
+    d._planilha = cleanText(d[colPlanilha]).toUpperCase() || '(VAZIO)';
+    d._obs      = cleanText(d[colObs]);
+
+    const eq = cleanText(d[colEquip]).toUpperCase();
+    if (isEmpty(eq)) d._equip = 'Vazio';
+    else if (eq.includes('NAO ENCONTRADA') || eq.includes('NÃO ENCONTRADA')) d._equip = 'Não encontrada';
+    else d._equip = 'Encontrada/ID';
+
+    d._eh0km      = d._placa === '0KM' || d._placa === '0 KM';
+    d._placaValida = /^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$/.test(d._placa) ||
+                     /^[A-Z]{3}[0-9]{4}$/.test(d._placa);
+  });
+
+  // duplicidade de placas
+  const counter = {};
+  data.forEach(d => {
+    if (d._placa && !d._eh0km) counter[d._placa] = (counter[d._placa] || 0) + 1;
+  });
+  data.forEach(d => { d._dup = !!(counter[d._placa] && counter[d._placa] > 1); });
+
+  // conflitos operacionais
+  data.forEach(d => {
+    d._conflitoTracker = d._tracker === 'SIM' && d._equip === 'Não encontrada';
+    d._pendInstalacao  = d._planilha === 'SIM' && d._tracker !== 'SIM';
+    d._pendPlanilha    = d._tracker === 'SIM' && d._planilha !== 'SIM';
+  });
+
+  render(data, colObs);
+}
+
+// ============================================================
+// AGRUPAMENTOS
+// ============================================================
+function counts(data, fn) {
+  const m = {};
+  data.forEach(d => { const k = fn(d); m[k] = (m[k] || 0) + 1; });
+  return Object.entries(m).sort((a, b) => b[1] - a[1]);
+}
+
+// ============================================================
+// PALETA DE CORES
+// ============================================================
+const CHART_COLORS = [
+  '#1f4e79','#2E86AB','#4dabf7','#74c0fc','#a5d8ff',
+  '#ffc078','#ffa94d','#ff922b','#e8590c','#c92a2a',
+  '#7048e8','#5f3dc4','#ae3ec9','#f06595','#f783ac',
+  '#20c997','#12b886','#087f5b','#94d82d','#66a80f',
+  '#868e96','#495057'
+];
+
+// ============================================================
+// RENDER
+// ============================================================
+function render(data) {
+  document.getElementById('loading').style.display = 'none';
+  document.getElementById('fileZone').style.display = 'none';
+  const r = document.getElementById('report');
+  r.style.display = 'block';
+
+  const total       = data.length;
+  const n0km        = data.filter(d => d._eh0km).length;
+  const nValidas    = data.filter(d => d._placaValida).length;
+  const nTrackerSim = data.filter(d => d._tracker === 'SIM').length;
+  const nTrackerNao = data.filter(d => d._tracker === 'NÃO' || d._tracker === 'NAO').length;
+  const nEquipNF    = data.filter(d => d._equip === 'Não encontrada').length;
+  const nEquipOk    = data.filter(d => d._equip === 'Encontrada/ID').length;
+  const nConflito   = data.filter(d => d._conflitoTracker).length;
+  const nPendInst   = data.filter(d => d._pendInstalacao).length;
+  const nPendPlan   = data.filter(d => d._pendPlanilha).length;
+  const nDup        = data.filter(d => d._dup).length;
+
+  const cards = [
+    { v: total,       l: 'Total de linhas' },
+    { v: n0km,        l: 'Registros 0KM / sem placa' },
+    { v: nValidas,    l: 'Placas válidas' },
+    { v: total - nValidas, l: 'Placas inválidas/sem placa' },
+    { v: nTrackerSim, l: 'Tracker = Sim' },
+    { v: nTrackerNao, l: 'Tracker = Não' },
+    { v: nEquipOk,    l: 'Equipamento encontrado' },
+    { v: nEquipNF,    l: 'Equipamento não encontrado' },
+    { v: nConflito,   l: 'Tracker=Sim × Equip=Não encontrado', alert: true },
+    { v: nPendInst,   l: 'Planilha=Sim e Tracker=Não', alert: true },
+    { v: nPendPlan,   l: 'Tracker=Sim e Planilha=Não', alert: true },
+    { v: nDup,        l: 'Linhas com placa duplicada', alert: true }
+  ];
+
+  let html = '<h2>1. Resumo executivo</h2><div class="cards">';
+  cards.forEach(c => {
+    html += `<div class="card ${c.alert ? 'alert' : ''}">
+      <div class="num">${c.v.toLocaleString('pt-BR')}</div>
+      <div class="label">${c.l}</div>
+    </div>`;
+  });
+  html += '</div>';
+
+  html += '<h2>2. Distribuições principais</h2><div class="chart-grid">';
+  [
+    ['cSituacao', 'Situação'],
+    ['cOrigem',   'Origem'],
+    ['cTipo',     'Tipo de veículo'],
+    ['cTracker',  'Tracker instalado'],
+    ['cPlanilha', 'Planilha de instalação'],
+    ['cEquip',    'Status do equipamento'],
+    ['cModelos',  'Top 15 modelos']
+  ].forEach(([id, titulo]) => {
+    html += `<div class="chart-box"><h3>${titulo}</h3>
+      <div class="wrap"><canvas id="${id}"></canvas></div></div>`;
+  });
+  html += '</div>';
+
+  const situacao = counts(data, d => d._situacao);
+  const origem   = counts(data, d => d._origem);
+  const tipo     = counts(data, d => d._tipo);
+  const tracker  = counts(data, d => d._tracker);
+  const planilha = counts(data, d => d._planilha);
+  const equip    = counts(data, d => d._equip);
+  const modelos  = counts(data, d => d._modelo || '(VAZIO)').slice(0, 15);
+
+  html += '<h2>3. Tabelas de apoio</h2><div class="chart-grid">';
+  html += tabelaHTML('Situação', situacao);
+  html += tabelaHTML('Origem', origem);
+  html += tabelaHTML('Tipo de veículo', tipo);
+  html += tabelaHTML('Tracker instalado', tracker);
+  html += tabelaHTML('Planilha de instalação', planilha);
+  html += tabelaHTML('Status do equipamento', equip);
+  html += tabelaHTML('Top 15 modelos', modelos);
+  html += '</div>';
+
+  // Cruzamentos
+  const sitTop = situacao.slice(0, 10).map(x => x[0]);
+  const trackers = tracker.map(x => x[0]);
+
+  html += '<h2>4. Cruzamentos</h2>';
+
+  // Situação × Tracker
+  html += '<div class="table-box"><h3>Situação × Tracker instalado</h3><table class="heat"><thead><tr><th>Situação</th>';
+  trackers.forEach(t => html += `<th>${esc(t)}</th>`);
+  html += '<th>Total</th></tr></thead><tbody>';
+  sitTop.forEach(s => {
+    const base = data.filter(d => d._situacao === s).length || 1;
+    html += `<tr><td class="h-label">${esc(s)}</td>`;
+    let tot = 0;
+    trackers.forEach(t => {
+      const n = data.filter(d => d._situacao === s && d._tracker === t).length;
+      tot += n;
+      const a = n === 0 ? 0 : Math.max(0.15, n / base);
+      html += `<td style="background: rgba(31,78,121,${a}); color:${a > 0.5 ? '#fff' : '#111'}">${n}</td>`;
+    });
+    html += `<td><b>${tot}</b></td></tr>`;
+  });
+  html += '</tbody></table></div>';
+
+  // Origem × Situação
+  const origTop = origem.map(x => x[0]);
+  html += '<div class="table-box"><h3>Origem × Situação</h3><table class="heat"><thead><tr><th>Origem</th>';
+  sitTop.forEach(s => html += `<th>${esc(s)}</th>`);
+  html += '<th>Total</th></tr></thead><tbody>';
+  origTop.forEach(o => {
+    const base = data.filter(d => d._origem === o).length || 1;
+    html += `<tr><td class="h-label">${esc(o)}</td>`;
+    let tot = 0;
+    sitTop.forEach(s => {
+      const n = data.filter(d => d._origem === o && d._situacao === s).length;
+      tot += n;
+      const a = n === 0 ? 0 : Math.max(0.15, n / base);
+      html += `<td style="background: rgba(31,78,121,${a}); color:${a > 0.5 ? '#fff' : '#111'}">${n}</td>`;
+    });
+    html += `<td><b>${tot}</b></td></tr>`;
+  });
+  html += '</tbody></table></div>';
+
+  // Recomendações
+  html += `
+    <h2>5. Recomendações</h2>
+    <div class="table-box">
+      <ol>
+        <li>Separar os registros <b>0 KM / sem placa</b> dos emplacados para não distorcer indicadores.</li>
+        <li>Padronizar status: <b>ATIVO, DESLIGADO, INADIMPLENTE, INATIVO, SINISTRO, FURTO/ROUBO</b>.</li>
+        <li>Corrigir conflitos em que <b>Tracker = Sim</b> e <b>Equipamento = Não encontrada</b>.</li>
+        <li>Tratar <b>Planilha de instalação = Sim</b> e <b>Tracker = Não</b> como pendência de instalação.</li>
+        <li>Deduplicar placas repetidas e corrigir placas inválidas.</li>
+        <li>Padronizar textos com problemas de codificação, como <b>CAMINHÃƒO</b>.</li>
+        <li>Priorizar veículos <b>ATIVOS</b> sem tracker ou sem equipamento localizado.</li>
+      </ol>
+    </div>`;
+
+  r.innerHTML = html;
+
+  // construir gráficos
+  criarGrafico('cSituacao', 'bar', situacao, 'Situação', false);
+  criarGrafico('cOrigem',   'doughnut', origem, 'Origem', false);
+  criarGrafico('cTipo',     'bar', tipo.slice(0, 12), 'Tipo de veículo', false);
+  criarGrafico('cTracker',  'doughnut', tracker, 'Tracker instalado', false);
+  criarGrafico('cPlanilha', 'bar', planilha, 'Planilha de instalação', false);
+  criarGrafico('cEquip',    'doughnut', equip, 'Status do equipamento', false);
+  criarGrafico('cModelos',  'bar', modelos, 'Top 15 modelos', true);
+}
+
+function tabelaHTML(titulo, arr) {
+  const total = arr.reduce((s, x) => s + x[1], 0) || 1;
+  let h = `<div class="table-box"><h3>${esc(titulo)}</h3>
+    <table><thead><tr><th>Categoria</th><th>Quantidade</th><th>%</th></tr></thead><tbody>`;
+  arr.forEach(([k, v]) => {
+    const pct = (v / total * 100).toFixed(1);
+    h += `<tr><td>${esc(k)}</td><td>${v.toLocaleString('pt-BR')}</td><td>${pct}%</td></tr>`;
+  });
+  h += '</tbody></table></div>';
+  return h;
+}
+
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function criarGrafico(id, tipo, arr, titulo, horizontal) {
+  const canvas = document.getElementById(id);
+  if (!canvas) return;
+  const labels = arr.map(x => x[0]);
+  const values = arr.map(x => x[1]);
+  const colors = labels.map((_, i) => CHART_COLORS[i % CHART_COLORS.length]);
+  const isPie = tipo === 'doughnut' || tipo === 'pie';
+  const total = values.reduce((a, b) => a + b, 0) || 1;
+
+  new Chart(canvas, {
+    type: tipo,
+    data: {
+      labels,
+      datasets: [{
+        label: titulo,
+        data: values,
+        backgroundColor: colors,
+        borderColor: isPie ? '#fff' : 'transparent',
+        borderWidth: isPie ? 2 : 0
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      indexAxis: horizontal ? 'y' : 'x',
+      plugins: {
+        legend: { display: isPie, position: 'bottom',
+                  labels: { boxWidth: 12, font: { size: 11 } } },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              const num = typeof ctx.parsed === 'number'
+                ? ctx.parsed
+                : (ctx.parsed.x ?? ctx.parsed.y ?? 0);
+              const pct = (num / total * 100).toFixed(1);
+              return `${ctx.label}: ${num.toLocaleString('pt-BR')} (${pct}%)`;
+            }
+          }
+        }
+      },
+      scales: isPie ? {} : {
+        x: { beginAtZero: true, ticks: { precision: 0 } },
+        y: { beginAtZero: true, ticks: { precision: 0 } }
+      }
+    }
+  });
+}
+
+// ============================================================
+// INICIALIZAÇÃO
+// ============================================================
+tryAutoLoad();
+</script>
+</body>
+</html>
